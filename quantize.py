@@ -8,12 +8,11 @@ import torch
 from torch import nn
 from torch.autograd import Variable
 import numpy as np
-import onnxruntime
 from onnxruntime.quantization import CalibrationDataReader, QuantFormat, quantize_static, QuantType, CalibrationMethod
 from lib.models import get_net
 from lib.config import cfg
-from lib.models.YOLOP_ import YOLOP
-from lib.models.common2_ import Conv, SPP, Bottleneck, BottleneckCSP, Focus, Concat, Detect, SharpenConv
+from lib.models.YOLOP import YOLOP
+from lib.models.common2 import Conv, SPP, Bottleneck, BottleneckCSP, Focus, Concat, Detect, SharpenConv
 from torch.nn import Upsample
 
 device = 'cuda:0'
@@ -37,7 +36,6 @@ def evaluate(model, val_data_dir_bdd, val_data_dir_kitti):
     image_list2 = [os.path.join(val_data_dir_kitti, image_name) for image_name in image_names if os.path.exists(os.path.join(val_data_dir_kitti, image_name))][:100]
     image_list = image_list1 + image_list2
     
-    
     for img_path in image_list:
         # img_path = '/media/zhutianyi/KESU/project/YOLOP/inference/images/000000.png'
         img_bgr = cv2.imread(img_path)
@@ -60,19 +58,6 @@ def evaluate(model, val_data_dir_bdd, val_data_dir_kitti):
         # _, da_seg_mask = torch.max(b, 1)
         # import pdb;pdb.set_trace()
         # pass
-
-class QuantizedMCnet(nn.Module):
-    def __init__(self,model):
-        super(QuantizedMCnet,self).__init__()
-        self.quant = torch.quantization.QuantStub()
-        self.dequant = torch.quantization.DeQuantStub()
-        self.model_fp32 = model
-    
-    def forward(self,x):
-        x = self.quant(x)
-        x = self.model_fp32(x)
-        x = self.dequant(x)
-        return x        
 
 def resize_unscale(img, new_shape=(640, 640), color=114):
     shape = img.shape[:2]  # current shape [height, width]
@@ -99,75 +84,9 @@ def resize_unscale(img, new_shape=(640, 640), color=114):
     canvas[dh:dh + new_unpad_h, dw:dw + new_unpad_w, :] = img
     return canvas, r, dw, dh, new_unpad_w, new_unpad_h  # (dw,dh)
 
-#
-def proprocess_func(image_folder,input_name,img_size):
-    p = str(Path(image_folder)) 
-    p = os.path.abspath(p)
-    files = sorted(glob.glob(os.path.join(p, '*.*')))
-    images = [x for x in files if os.path.splitext(x)[-1].lower() in img_formats]
-    images_processed = []
-
-    for img_path in images:
-        img_bgr = cv2.imread(img_path)
-        # convert to RGB
-        img_rgb = img_bgr[:, :, ::-1].copy()
-        canvas, r, dw, dh, new_unpad_w, new_unpad_h = resize_unscale(img_rgb, (640, 640))
-        img = canvas.copy().astype(np.float32)  # (3,640,640) RGB
-        img /= 255.0
-        img[:, :, 0] -= 0.485
-        img[:, :, 1] -= 0.456
-        img[:, :, 2] -= 0.406
-        img[:, :, 0] /= 0.229
-        img[:, :, 1] /= 0.224
-        img[:, :, 2] /= 0.225
-        img = img.transpose(2, 0, 1)
-        img = np.expand_dims(img, 0)  # (1, 3,640,640)
-        images_processed.append(img)
-        
-    return images_processed
-    
-# 校准数据读取器
-class DataReader(CalibrationDataReader):
-    def __init__(self, calibration_image_folder, model_path, img_size=640):
-        self.image_folder = calibration_image_folder
-        self.session = onnxruntime.InferenceSession(model_path, None)
-        self.input_name = self.session.get_inputs()[0].name
-        
-        self.enum_data_lists = proprocess_func(self.image_folder, self.input_name, img_size)
-        self.enum_data_dicts = iter([{self.input_name: nhwc_data} for nhwc_data in self.enum_data_lists])
-    def get_next(self):
-        return next(self.enum_data_dicts, None)
-
-# data_reader = DataReader(images_folder,model_fp32_onnx,640)
-
-# while True:
-#     data_sample = data_reader.get_next()
-#     if data_sample is not None:
-#         # 对获取的数据样本进行操作
-#         input_data = data_sample[data_reader.input_name]
-#         # 在这里可以将 input_data 传递给量化过程
-#         print("Input data shape:", input_data.shape)
-#     else:
-#         print("No more data samples.")
-#         break
-
-
-# # 静态量化
-# quantize_static(
-#     model_input=model_fp32_onnx, # 输入模型
-#     model_output=model_quant_static, # 输出模型
-#     calibration_data_reader=data_reader, # 校准数据读取器
-#     quant_format= QuantFormat.QDQ, # 量化格式 QDQ / QOperator
-#     activation_type=QuantType.QUInt8, # 激活类型 Int8 / UInt8
-#     weight_type=QuantType.QInt8, # 参数类型 Int8 / UInt8
-#     calibrate_method=CalibrationMethod.MinMax, # 数据校准方法 MinMax / Entropy / Percentile
-#     optimize_model=True # 是否优化模型
-# )
-
 model = get_net(cfg)
-checkpoint = torch.load(model_fp32_pth, map_location= device)
-torch.save(checkpoint['state_dict'],"./model_float32.pth")
-model.load_state_dict(checkpoint['state_dict'])
+checkpoint = torch.load("./model_float32.pth", map_location= device)
+model.load_state_dict(checkpoint)
 model.eval()
 
 # ###
@@ -177,6 +96,7 @@ img_bgr = cv2.imread(img_path)
 img_rgb = img_bgr[:, :, ::-1].copy()
 canvas, r, dw, dh, new_unpad_w, new_unpad_h = resize_unscale(img_rgb, (640, 640))
 img = canvas.copy().astype(np.float32)  # (3,640,640) RGB
+#normalize
 img /= 255.0
 img[:, :, 0] -= 0.485
 img[:, :, 1] -= 0.456
