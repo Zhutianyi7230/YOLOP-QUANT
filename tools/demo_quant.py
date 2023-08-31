@@ -17,7 +17,7 @@ import scipy.special
 import numpy as np
 import torchvision.transforms as transforms
 import PIL.Image as image
-
+from quantize import evaluate
 from lib.models.common2 import Conv, SPP, Bottleneck, BottleneckCSP, Focus, Concat, Detect, SharpenConv
 from torch.nn import Upsample
 from lib.config import cfg
@@ -119,80 +119,67 @@ def resize_unscale(img, new_shape=(640, 640), color=114):
     canvas[dh:dh + new_unpad_h, dw:dw + new_unpad_w, :] = img
     return canvas, r, dw, dh, new_unpad_w, new_unpad_h  # (dw,dh)
 
-
 def detect(cfg,opt):
-
+    images_folder_bdd = '/media/zhutianyi/KESU/datasets/bdd100k/images/100k/val'
+    images_folder_kitti = '/media/zhutianyi/KESU/datasets/kitti/testing/image_2'
     logger, _, _ = create_logger(
         cfg, cfg.LOG_DIR, 'demo')
-
     device = select_device(logger,opt.device)
     if os.path.exists(opt.save_dir):  # output dir
         shutil.rmtree(opt.save_dir)  # delete dir
     os.makedirs(opt.save_dir)  # make new dir
-    half = device.type != 'cpu'  # half precision only supported on CUDA
     
     # Load model
     ###
     model_fp32 = get_net(cfg)
     model_fp32.eval()
-    
-    # ##fuse
-    # for module_name, module in model_fp32.named_children():
-    #     for layer_index,module in module.named_children():
-    #         if YOLOP[int(layer_index)+1][1] is Conv:
-    #             torch.quantization.fuse_modules(module,[["conv", "bn", "act"]],inplace=True)
-    #         elif YOLOP[int(layer_index)+1][1] is Focus:
-    #             for module_name,module in module.named_children():
-    #                 if module_name=='conv':
-    #                     torch.quantization.fuse_modules(module,[["conv", "bn", "act"]],inplace=True)
-    #         elif YOLOP[int(layer_index)+1][1] is SPP:
-    #             for module_name,module in module.named_children():
-    #                 if module_name=='cv1' or module_name=='cv2':
-    #                     torch.quantization.fuse_modules(module,[["conv", "bn", "act"]],inplace=True)
-    #         elif YOLOP[int(layer_index)+1][1] is BottleneckCSP:
-    #             for module_name,module in module.named_children():
-    #                 if module_name=='cv1' or module_name=='cv4':
-    #                     torch.quantization.fuse_modules(module,[["conv", "bn", "act"]],inplace=True)
-    #                 elif module_name=='m':
-    #                     for module_name,module in module.named_children():
-    #                         for module_name,module in module.named_children():
-    #                             if module_name=='cv1' or module_name=='cv2':
-    #                                 torch.quantization.fuse_modules(module,[["conv", "bn", "act"]],inplace=True)
-    # ###
+    checkpoint = torch.load("./weights/model_float32.pth", map_location= device)
+    model_fp32.load_state_dict(checkpoint)
+
+    ##fuse
+    for module_name, module in model_fp32.named_children():
+        for layer_index,module in module.named_children():
+            if YOLOP[int(layer_index)+1][1] is Conv:
+                torch.quantization.fuse_modules(module,[["conv", "bn"]],inplace=True)
+            elif YOLOP[int(layer_index)+1][1] is Focus:
+                for module_name,module in module.named_children():
+                    if module_name=='conv':
+                        torch.quantization.fuse_modules(module,[["conv", "bn"]],inplace=True)
+            elif YOLOP[int(layer_index)+1][1] is SPP:
+                for module_name,module in module.named_children():
+                    if module_name=='cv1' or module_name=='cv2':
+                        torch.quantization.fuse_modules(module,[["conv", "bn"]],inplace=True)
+            elif YOLOP[int(layer_index)+1][1] is BottleneckCSP:
+                for module_name,module in module.named_children():
+                    if module_name=='cv1' or module_name=='cv4':
+                        torch.quantization.fuse_modules(module,[["conv", "bn"]],inplace=True)
+                    elif module_name=='m':
+                        for module_name,module in module.named_children():
+                            for module_name,module in module.named_children():
+                                if module_name=='cv1' or module_name=='cv2':
+                                    torch.quantization.fuse_modules(module,[["conv", "bn"]],inplace=True)
+    ###
 
     model_fp32.qconfig = torch.quantization.get_default_qconfig('fbgemm')
     model_fp32_prepared = torch.quantization.prepare(model_fp32)
+    evaluate(model_fp32_prepared,images_folder_bdd,images_folder_kitti)
     model_int8 = torch.quantization.convert(model_fp32_prepared)
     model_int8.eval()
-
-    state_dict = torch.load('./model_int8_quant.pth')
-    model_int8.load_state_dict(state_dict)
     model = model_int8
     model.eval()
-
     # Set Dataloader
     if opt.source.isnumeric():
         cudnn.benchmark = True  # set True to speed up constant image size inference
         dataset = LoadStreams(opt.source, img_size=opt.img_size)
-        bs = len(dataset)  # batch_size
     else:
         dataset = LoadImages(opt.source, img_size=opt.img_size)
-        bs = 1  # batch_size
-
 
     # Get names and colors
     names = model.module.names if hasattr(model, 'module') else model.names
     colors = [[random.randint(0, 255) for _ in range(3)] for _ in range(len(names))]
 
-
     # Run inference
     t0 = time.time()
-
-    # vid_path, vid_writer = None, None
-    # img = torch.zeros((1, 3, opt.img_size, opt.img_size), device=device)  # init img
-    # _ = model(img.half() if half else img) if device.type != 'cpu' else None  # run once
-    # model.eval()
-
     inf_time = AverageMeter()
     nms_time = AverageMeter()
     yolop_time = AverageMeter()
@@ -200,11 +187,11 @@ def detect(cfg,opt):
     
     for i, (path, img, img_det, vid_cap,shapes) in tqdm(enumerate(dataset),total = len(dataset)):
         img = transform(img).to(device)
-        img = img.half() if half else img.float()  # uint8 to fp16/32
+        img =img.float()  # uint8 to fp16/32
         if img.ndimension() == 3:
             img = img.unsqueeze(0)
-        # Inference
-        t1 = time_synchronized()
+        # # Inference
+        t1 = time_synchronized()   
         det_out, da_seg_out,ll_seg_out= model(img)
         t2 = time_synchronized()
 
@@ -237,7 +224,6 @@ def detect(cfg,opt):
         _, da_seg_mask = torch.max(da_seg_mask, 1)
         da_seg_mask = da_seg_mask.int().squeeze().cpu().numpy()
         # da_seg_mask = morphological_process(da_seg_mask, kernel_size=7)
-        import pdb;pdb.set_trace()
         ll_predict = ll_seg_out[:, :,int(pad_h):(height-int(pad_h+0.5)),pad_w:(width-pad_w)]
         # ll_seg_mask = torch.nn.functional.interpolate(ll_predict, scale_factor=int(1/ratio), mode='bilinear')
         ll_seg_mask = torch.nn.functional.interpolate(ll_predict, scale_factor=(1/ratio), mode='bilinear')

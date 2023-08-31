@@ -546,33 +546,30 @@ class MCnet(nn.Module):
         initialize_weights(self)
 
     def forward(self, x):
+        x = self.quant(x)
         cache = []
         out = []
         det_out = None
         Da_fmap = []
         LL_fmap = []
         for i, block in enumerate(self.model):
-            # if i==0:
-            #     import pdb;pdb.set_trace()
+
             if block.from_ != -1:
                 x = cache[block.from_] if isinstance(block.from_, int) else [x if j == -1 else cache[j] for j in block.from_]       #calculate concat detect
-                if isinstance(block.from_, int):
-                    x = self.quant(x)
-                else:
-                    x = [self.quant(y) for y in x]
-            else:
-                x = self.quant(x)
-            # if i==0:
-            #     import pdb;pdb.set_trace()
             x = block(x)
-            if not isinstance(x,tuple):
-                x = self.dequant(x)
-                
+               
             if i in self.seg_out_idx:     #save driving area segment result
+                z = self.dequant(x)
                 m=nn.Sigmoid()
-                out.append(m(x))
+                out.append(z)
             if i == self.detector_index:
                 det_out = x
+                # if self.training:
+                #     det_out = x
+                # else:
+                #     x0 = self.dequant(x[0])
+                #     x1 = [self.dequant(y) for y in x[1]]
+                #     det_out = (x0,x1)###
             cache.append(x if block.index in self.save else None)
         out.insert(0,det_out)
         return out
